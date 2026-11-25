@@ -141,8 +141,7 @@ select, .hand input {
 }
 select:disabled { opacity: .4; }
 .hand { display: flex; align-items: center; gap: 6px; }
-.hand input { width: 64px; text-align: center; font-variant-numeric: oldstyle-nums; }
-.hand input:disabled { opacity: .35; }
+.hand select { flex: 1; min-width: 0; }
 .roll, .toggle { background: none; border: 0; cursor: pointer; padding: 0; color: var(--ink-2); font: 18px "Fell", serif; }
 .roll img { width: 30px; display: block; transition: transform .5s; }
 .roll:hover img { transform: rotate(72deg); }

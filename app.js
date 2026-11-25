@@ -4,13 +4,13 @@ const $ = (id) => document.getElementById(id);
 const els = {
   src: $("src"), tally: $("tally"), year: $("year"), roman: $("roman"), slider: $("slider"), ticks: $("ticks"),
   en: $("t-en"), sc: $("t-sc"), go: $("go"), goLabel: $("go-label"), status: $("status"), hourglass: $("hourglass"),
-  sand: $("sand"), region: $("region"), hand: $("hand"), roll: $("roll"), nohand: $("nohand"), liberty: $("liberty"),
+  sand: $("sand"), region: $("region"), hand: $("hand"), roll: $("roll"), liberty: $("liberty"),
   out: $("out"), tail: $("tail"), tools: $("tools"), copy: $("copy"), save: $("save"), band: $("era-band"),
 };
 $("source").href = CONFIG.source;
 $("weights").href = CONFIG.weights;
 
-const state = { scots: false, ready: false, working: false, meta: null, hand: 1 + Math.floor(Math.random() * 9999), noHand: false };
+const state = { scots: false, ready: false, working: false, meta: null, roll: Math.floor(Math.random() * 1e6), famous: [], rerun: false };
 let ranges = { english: [1380, 1790], scots: [1500, 1905] };
 const REGIONS = ["<unk>", "england", "scotland", "ireland", "wales", "colonies", "continent"];
 
@@ -43,6 +43,20 @@ function setYear(y) {
   if (col.disabled && els.region.value === "colonies") els.region.value = "auto";
 }
 els.slider.addEventListener("input", () => setYear(+els.slider.value));
+els.slider.addEventListener("change", () => {
+  const v = els.hand.value;
+  if (v.startsWith("f") && Math.abs(state.famous[+v.slice(1)].y - +els.slider.value) > 40) els.hand.value = "random";
+  changed();
+});
+let rerunTimer = null;
+function changed() {
+  if (!state.ready || !pieces.some((t) => t)) return;
+  clearTimeout(rerunTimer);
+  rerunTimer = setTimeout(() => {
+    if (state.working) { state.rerun = true; worker.postMessage({ type: "cancel" }); }
+    else go();
+  }, 350);
+}
 
 /* ---------- tongue ---------- */
 function setTongue(scots) {
@@ -51,14 +65,37 @@ function setTongue(scots) {
   els.en.setAttribute("aria-checked", !scots); els.sc.setAttribute("aria-checked", scots);
   drawTicks(); setYear(+els.slider.value);
 }
-els.en.onclick = () => setTongue(false);
-els.sc.onclick = () => setTongue(true);
+els.en.onclick = () => { if (state.scots) { setTongue(false); changed(); } };
+els.sc.onclick = () => { if (!state.scots) { setTongue(true); changed(); } };
+els.region.addEventListener("change", () => changed());
+els.liberty.addEventListener("change", () => changed());
 
 /* ---------- hand ---------- */
-function showHand() { els.hand.value = state.hand; els.hand.disabled = state.noHand; els.nohand.classList.toggle("on", state.noHand); }
-els.roll.onclick = () => { state.hand = 1 + Math.floor(Math.random() * 9999); state.noHand = false; showHand(); };
-els.nohand.onclick = () => { state.noHand = !state.noHand; showHand(); };
-els.hand.onchange = () => { const v = Math.round(+els.hand.value); if (v >= 1 && v <= 9999) state.hand = v; showHand(); };
+function fillHands(famous, pool) {
+  state.famous = famous;
+  els.hand.innerHTML = '<option value="none">∅</option>' + (pool ? '<option value="random">⚄ of the period</option>' : "");
+  if (famous.length) {
+    const g = document.createElement("optgroup"); g.label = "—";
+    famous.forEach((f, i) => { const o = document.createElement("option"); o.value = `f${i}`; o.textContent = `${f.n}, ${f.y}`; g.appendChild(o); });
+    els.hand.appendChild(g);
+  }
+  els.hand.value = pool ? "random" : "none"; els.roll.disabled = !pool;
+}
+function handSpec() {
+  const v = els.hand.value;
+  if (v.startsWith("f")) return { mode: "famous", idx: +v.slice(1) };
+  return v === "random" ? { mode: "random", roll: state.roll } : { mode: "none" };
+}
+els.roll.onclick = () => { state.roll = Math.floor(Math.random() * 1e6); if ([...els.hand.options].some((o) => o.value === "random")) els.hand.value = "random"; changed(); };
+els.hand.onchange = () => {
+  const v = els.hand.value;
+  if (v.startsWith("f")) {
+    const f = state.famous[+v.slice(1)];
+    if (f.s && !state.scots) setTongue(true); else if (!f.s && state.scots) setTongue(false);
+    setYear(f.y);
+  }
+  changed();
+};
 
 /* ---------- input ---------- */
 function tally() {
@@ -142,6 +179,7 @@ worker.onmessage = ({ data }) => {
     status(`preparing the press · ${Math.round(data.frac * 100)}%`);
   } else if (data.type === "ready") {
     state.ready = true; state.meta = data.meta;
+    fillHands(data.famous || [], data.pool || 0);
     if (data.meta.years) { ranges = data.meta.years; drawTicks(); setYear(+els.slider.value); }
     els.hourglass.hidden = true; els.go.disabled = false; status("");
   } else if (data.type === "start") {
@@ -153,6 +191,7 @@ worker.onmessage = ({ data }) => {
     els.sand.style.transform = `scaleX(${(data.i + 1) / chunkList.length})`;
   } else if (data.type === "done") {
     finish();
+    if (state.rerun) { state.rerun = false; go(); }
   } else if (data.type === "error") {
     if (data.message === "nometa") { status("the press awaits its type"); return; }
     status("the press has jammed"); console.error(data.message); finish();
@@ -180,7 +219,7 @@ function go() {
   const region = els.region.value === "auto" ? (state.scots ? "scotland" : "england") : els.region.value;
   const settings = {
     year: +els.slider.value, scots: state.scots ? 1 : 0, region: Math.max(0, REGIONS.indexOf(region)),
-    hand: state.noHand ? 0 : state.hand, temp: (+els.liberty.value / 100) * 1.1, seed: (state.hand * 31 + +els.slider.value) >>> 0,
+    hand: handSpec(), temp: (+els.liberty.value / 100) * 1.1, seed: (state.roll * 31 + +els.slider.value) >>> 0,
   };
   state.working = true;
   els.go.classList.add("working"); els.goLabel.textContent = "Stay";
@@ -191,4 +230,4 @@ function go() {
 }
 els.go.onclick = go;
 
-drawTicks(); setYear(1650); showHand(); tally();
+drawTicks(); setYear(1650); tally();

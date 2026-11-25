@@ -3,7 +3,7 @@ import * as ort from "./vendor/ort.wasm.min.mjs";
 ort.env.wasm.wasmPaths = new URL("./vendor/", import.meta.url).href;
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
 
-let enc, dec, meta, cancelled = false;
+let enc, dec, meta, hands = null, cancelled = false;
 
 async function fetchBytes(url, version, onProgress) {
   const key = `${url}?v=${version}`;
@@ -54,7 +54,22 @@ async function load(base) {
   const opt = { executionProviders: ["wasm"], graphOptimizationLevel: "all" };
   enc = await ort.InferenceSession.create(eb, opt);
   dec = await ort.InferenceSession.create(db, opt);
-  postMessage({ type: "ready", meta });
+  try {
+    const h = await fetch(base + "hands.json", { cache: "no-cache" });
+    if (h.ok) hands = await h.json();
+    if (hands && hands.pool && hands.pool.file) {
+      const p = hands.pool, b = new Uint8Array(await (await fetch(base + p.file)).arrayBuffer());
+      const rec = 3 + p.dim, n = Math.floor(b.length / rec);
+      const years = new Uint16Array(n), regions = new Uint8Array(n), zq = new Int8Array(n * p.dim);
+      for (let i = 0; i < n; i++) {
+        const o = i * rec; years[i] = b[o] | (b[o + 1] << 8); regions[i] = b[o + 2];
+        for (let d = 0; d < p.dim; d++) { const v = b[o + 3 + d]; zq[i * p.dim + d] = v > 127 ? v - 256 : v; }
+      }
+      hands.pool = { n, dim: p.dim, lo: p.lo, scale: p.scale, years, regions, zq };
+    }
+  } catch (_) {}
+  const famous = hands && hands.famous ? hands.famous.map((h) => ({ n: h.n, y: h.y, r: h.r, s: h.s || 0 })) : [];
+  postMessage({ type: "ready", meta, famous, pool: hands && hands.pool ? hands.pool.n : 0 });
 }
 
 function rng(seed) {
@@ -62,14 +77,25 @@ function rng(seed) {
   return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 
-function scribe(hand) {
+function scribe(hand, year, region) {
   const z = new Float32Array(meta.z_dim);
-  if (!hand) return z;
-  const r = rng(hand * 2654435761);
-  for (let i = 0; i < z.length; i++) {
-    const n = Math.sqrt(-2 * Math.log(1 - r())) * Math.cos(2 * Math.PI * r());
-    z[i] = meta.z_mu[i] + meta.z_sd[i] * n;
+  if (!hands || !hand || hand.mode === "none") return z;
+  if (hand.mode === "famous") { const f = hands.famous[hand.idx]; if (f) z.set(f.z); return z; }
+  const p = hands.pool;
+  if (!p || !p.n) return z;
+  // every scribe within 40 years, weighted by closeness in date (and, softly, by region)
+  const idx = [], w = []; let tot = 0;
+  for (let i = 0; i < p.n; i++) {
+    const dy = p.years[i] - year;
+    if (Math.abs(dy) > 40) continue;
+    const wi = Math.exp(-0.5 * (dy / 14) ** 2) * (p.regions[i] === region ? 1 : 0.15);
+    idx.push(i); w.push(wi); tot += wi;
   }
+  if (!idx.length) return z;
+  let u = rng(hand.roll)() * tot, k = 0;
+  while (k < idx.length - 1 && (u -= w[k]) > 0) k++;
+  const i = idx[k];
+  for (let d = 0; d < p.dim; d++) z[d] = p.lo[d] + p.scale[d] * (p.zq[i * p.dim + d] + 128);
   return z;
 }
 
@@ -115,7 +141,7 @@ async function translateChunk(text, s, seed, onPartial) {
     year: new ort.Tensor("float32", new Float32Array([s.year]), [1]),
     region: new ort.Tensor("int64", new BigInt64Array([BigInt(s.region)]), [1]),
     scots: new ort.Tensor("float32", new Float32Array([s.scots]), [1]),
-    z: new ort.Tensor("float32", scribe(s.hand), [1, meta.z_dim]),
+    z: new ort.Tensor("float32", scribe(s.hand, s.year, s.region), [1, meta.z_dim]),
   });
   const L = meta.layers, H = meta.heads, hd = meta.head_dim;
   let pk = new ort.Tensor("float32", new Float32Array(L * H * hd), [L, 1, H, 1, hd]);
@@ -134,7 +160,10 @@ async function translateChunk(text, s, seed, onPartial) {
       cross_k: e.cross_k, cross_v: e.cross_v, dec_mod: e.dec_mod, past_k: pk, past_v: pv,
     });
     pk = r.present_k; pv = r.present_v;
-    tok = pick(r.logits.data, s.temp, rand);
+    const lg = r.logits.data;
+    const over = out.length / Math.max(8, src.length) - 1.15;          // past the source's length: lean towards stopping
+    if (over > 0) lg[meta.eos] += over * 12;
+    tok = pick(lg, s.temp, rand);
     if (tok === meta.eos) break;
     out.push(tok - meta.offset);
     shown += decoder.decode(new Uint8Array([tok - meta.offset]), { stream: true });
