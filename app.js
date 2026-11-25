@@ -231,4 +231,4 @@ function go() {
 }
 els.go.onclick = go;
 
-drawTicks(); setYear(1650); tally();
+drawTicks(); setYear(1620); tally();
