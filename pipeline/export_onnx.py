@@ -212,7 +212,7 @@ def main():
         from onnxruntime.quantization import quantize_dynamic, QuantType
         for f in ("encoder.onnx", "decoder.onnx"):
             quantize_dynamic(str(tmp / f), str(out / f), weight_type=QuantType.QInt8, per_channel=True,
-                             op_types_to_quantize=["MatMul", "Gemm"])
+                             op_types_to_quantize=["MatMul", "Gemm", "Gather"])
         print("quantised to int8")
 
     w = m.cond.doc_z.weight[1:].detach()
