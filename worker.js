@@ -102,13 +102,14 @@ async function load(base) {
     if (h.ok) hands = await h.json();
     if (hands && hands.pool && hands.pool.file) {
       const p = hands.pool, b = new Uint8Array(await (await fetch(base + p.file)).arrayBuffer());
-      const rec = 3 + p.dim, n = Math.floor(b.length / rec);
-      const years = new Uint16Array(n), regions = new Uint8Array(n), zq = new Int8Array(n * p.dim);
+      const rec = p.rec || 3 + p.dim, zo = rec - p.dim, n = Math.floor(b.length / rec);
+      const years = new Uint16Array(n), regions = new Uint8Array(n), mass = new Float32Array(n).fill(1), zq = new Int8Array(n * p.dim);
       for (let i = 0; i < n; i++) {
         const o = i * rec; years[i] = b[o] | (b[o + 1] << 8); regions[i] = b[o + 2];
-        for (let d = 0; d < p.dim; d++) { const v = b[o + 3 + d]; zq[i * p.dim + d] = v > 127 ? v - 256 : v; }
+        if (p.count) mass[i] = Math.sqrt(Math.min(1000, 2 ** (b[o + 3] / 16)));    // scribes with more data are drawn more often
+        for (let d = 0; d < p.dim; d++) { const v = b[o + zo + d]; zq[i * p.dim + d] = v > 127 ? v - 256 : v; }
       }
-      hands.pool = { n, dim: p.dim, lo: p.lo, scale: p.scale, years, regions, zq };
+      hands.pool = { n, dim: p.dim, lo: p.lo, scale: p.scale, years, regions, mass, zq };
     }
   } catch (_) {}
   const famous = hands && hands.famous ? hands.famous.map((h) => ({ n: h.n, y: h.y, r: h.r, s: h.s || 0 })) : [];
@@ -126,12 +127,12 @@ function scribe(hand, year, region) {
   if (hand.mode === "famous") { const f = hands.famous[hand.idx]; if (f) z.set(f.z); return z; }
   const p = hands.pool;
   if (!p || !p.n) return z;
-  // every scribe within 40 years, weighted by closeness in date (and, softly, by region)
+  // every scribe within 40 years, weighted by closeness in date, amount of data and (softly) region
   const idx = [], w = []; let tot = 0;
   for (let i = 0; i < p.n; i++) {
     const dy = p.years[i] - year;
     if (Math.abs(dy) > 40) continue;
-    const wi = Math.exp(-0.5 * (dy / 14) ** 2) * (p.regions[i] === region ? 1 : 0.15);
+    const wi = Math.exp(-0.5 * (dy / 14) ** 2) * (p.regions[i] === region ? 1 : 0.15) * p.mass[i];
     idx.push(i); w.push(wi); tot += wi;
   }
   if (!idx.length) return z;
