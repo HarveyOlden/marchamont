@@ -35,37 +35,55 @@ def mod(x, shift, scale):
     return x * (1 + scale[:, None]) + shift[:, None]
 
 
+def byte_layers(m, blocks, src, c, H, hd):
+    S = src.shape[1]
+    cos = m.rope.cos[:S][None, None]
+    sin = m.rope.sin[:S][None, None]
+    x = m.embed(src)
+    for b in blocks:
+        md = lin3(b.mod[1], F.silu(c)).chunk(6, dim=-1)
+        h = mod(b.norms[0](x), md[0], md[1])
+        q = b.self_attn.q(h).view(1, -1, H, hd).transpose(1, 2)
+        kv = b.self_attn.kv(h).view(1, -1, 2, H, hd).permute(2, 0, 3, 1, 4)
+        q, k, v = rot(q, cos, sin), rot(kv[0], cos, sin), kv[1]
+        a = torch.softmax(q @ k.transpose(-1, -2) / math.sqrt(hd), dim=-1) @ v
+        x = x + md[2][:, None] * b.self_attn.o(a.transpose(1, 2).reshape(1, -1, H * hd))
+        h = mod(b.norms[1](x), md[3], md[4])
+        x = x + md[5][:, None] * b.ff(h)
+    return x
+
+
+def cross_out(m, mem, c, H, hd):
+    ks, vs, mods = [], [], []
+    for b in m.dec:
+        kv = b.cross_attn.kv(mem).view(1, -1, 2, H, hd).permute(2, 0, 3, 1, 4)
+        ks.append(kv[0]); vs.append(kv[1])
+        mods.append(torch.stack(lin3(b.mod[1], F.silu(c)).chunk(9, dim=-1), 0))
+    return torch.stack(ks), torch.stack(vs), torch.stack(mods)
+
+
 class Encoder(nn.Module):
     def __init__(self, m):
         super().__init__()
         self.m = m
         cfg = m.cfg
-        self.H, self.hd, self.L = cfg.n_heads, cfg.d_model // cfg.n_heads, cfg.n_dec
+        self.H, self.hd = cfg.n_heads, cfg.d_model // cfg.n_heads
 
     def forward(self, src, year, region, scots, z):
         m, H, hd = self.m, self.H, self.hd
         c = m.cond(year=year, region=region, src_type=torch.ones_like(region), scots=scots, z=z, train_drop=False)
-        S = src.shape[1]
-        cos = m.rope.cos[:S][None, None]
-        sin = m.rope.sin[:S][None, None]
-        x = m.embed(src)
-        for b in m.enc:
-            md = lin3(b.mod[1], F.silu(c)).chunk(6, dim=-1)
-            h = mod(b.norms[0](x), md[0], md[1])
-            q = b.self_attn.q(h).view(1, -1, H, hd).transpose(1, 2)
-            kv = b.self_attn.kv(h).view(1, -1, 2, H, hd).permute(2, 0, 3, 1, 4)
-            q, k, v = rot(q, cos, sin), rot(kv[0], cos, sin), kv[1]
-            a = torch.softmax(q @ k.transpose(-1, -2) / math.sqrt(hd), dim=-1) @ v
-            x = x + md[2][:, None] * b.self_attn.o(a.transpose(1, 2).reshape(1, -1, H * hd))
-            h = mod(b.norms[1](x), md[3], md[4])
-            x = x + md[5][:, None] * b.ff(h)
-        mem = m.enc_norm(x)
-        ks, vs, mods = [], [], []
-        for b in m.dec:
-            kv = b.cross_attn.kv(mem).view(1, -1, 2, H, hd).permute(2, 0, 3, 1, 4)
-            ks.append(kv[0]); vs.append(kv[1])
-            mods.append(torch.stack(lin3(b.mod[1], F.silu(c)).chunk(9, dim=-1), 0))
-        return torch.stack(ks), torch.stack(vs), torch.stack(mods)
+        return cross_out(m, m.enc_norm(byte_layers(m, m.enc, src, c, H, hd)), c, H, hd)
+
+
+class DualEncoder(Encoder):
+    """T5 states (meaning) followed by byte-layer states (spelling), as one memory for the decoder."""
+
+    def forward(self, t5_ids, src, year, region, scots, z):
+        m, H, hd = self.m, self.H, self.hd
+        c = m.cond(year=year, region=region, src_type=torch.ones_like(region), scots=scots, z=z, train_drop=False)
+        m1 = m.adapt(m.t5(input_ids=t5_ids, attention_mask=torch.ones_like(t5_ids)).last_hidden_state)
+        m2 = m.benc_norm(byte_layers(m, m.benc, src, c, H, hd)) + m.stream
+        return cross_out(m, torch.cat([m1, m2], 1), c, H, hd)
 
 
 class DecoderStep(nn.Module):
@@ -110,18 +128,21 @@ def export(fn, args, path, names_in, names_out, axes):
 
 
 class OrtModel:
-    def __init__(self, enc_path, dec_path, cfg):
+    def __init__(self, enc_path, dec_path, cfg, t5tok=None):
         import onnxruntime as ort
         so = ort.SessionOptions(); so.intra_op_num_threads = max(1, os.cpu_count() // 2)
         self.enc = ort.InferenceSession(str(enc_path), so, providers=["CPUExecutionProvider"])
         self.dec = ort.InferenceSession(str(dec_path), so, providers=["CPUExecutionProvider"])
         self.L, self.H, self.hd = cfg.n_dec, cfg.n_heads, cfg.d_model // cfg.n_heads
+        self.t5tok = t5tok
 
     def greedy(self, text, year, region, scots, z, max_new=400):
         src = np.array([TOK.encode(text)], dtype=np.int64)
-        ck, cv, dm = self.enc.run(None, {"src": src, "year": np.array([year], np.float32),
-                                         "region": np.array([REGIONS.index(region)], np.int64),
-                                         "scots": np.array([scots], np.float32), "z": z[None].astype(np.float32)})
+        feed = {"src": src, "year": np.array([year], np.float32), "region": np.array([REGIONS.index(region)], np.int64),
+                "scots": np.array([scots], np.float32), "z": z[None].astype(np.float32)}
+        if self.t5tok is not None:
+            feed["t5_ids"] = np.array([self.t5tok.encode(text)], dtype=np.int64)
+        ck, cv, dm = self.enc.run(None, feed)
         pk = np.zeros((self.L, 1, self.H, 1, self.hd), np.float32); pv = pk.copy()
         tok, out = TOK.BOS, []
         for t in range(max_new):
@@ -150,19 +171,35 @@ def main():
 
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     cfg = ModelConfig.from_dict(ck["cfg"])
-    m = Nedham(cfg); m.load_state_dict(ck["model"]); m.eval()
+    hyb, t5tok = ck.get("hybrid"), None
+    if hyb:
+        from nedham.hybrid import DualNedham
+        from nedham.t5tok import T5Tok, vocab_from_hf
+        name = hyb["t5"] if "/" in hyb["t5"] else "google/" + hyb["t5"]
+        m = DualNedham(cfg, name, hyb.get("byte_layers", 2))
+        missing, unexpected = m.load_state_dict(ck["model"], strict=False)
+        missing = [k for k in missing if k != "t5.encoder.embed_tokens.weight"]
+        assert not missing and not unexpected, (missing[:6], unexpected[:6])
+        vocab = vocab_from_hf(m.t5_tok, m.max_src_tokens); t5tok = T5Tok(vocab)
+        print(f"dual model: T5 ({name}) + {len(m.benc)} byte layers, {m.n_params() / 1e6:.1f}M params")
+    else:
+        m = Nedham(cfg); m.load_state_dict(ck["model"])
+    m.eval()
     L, H, hd, S, P = cfg.n_dec, cfg.n_heads, cfg.d_model // cfg.n_heads, 12, 3
     z0 = torch.zeros(1, cfg.cond.z_dim)
 
-    enc, dec = Encoder(m).eval(), DecoderStep(m).eval()
+    enc, dec = (DualEncoder(m) if hyb else Encoder(m)).eval(), DecoderStep(m).eval()
     with torch.no_grad():
         src = torch.randint(4, 200, (1, S))
         args_e = (src, torch.tensor([1600.0]), torch.tensor([1]), torch.tensor([0.0]), z0)
+        names_e, axes_e = ["src", "year", "region", "scots", "z"], {"src": {1: "S"}, "cross_k": {3: "M"}, "cross_v": {3: "M"}}
+        if hyb:
+            args_e = (torch.tensor([t5tok.encode("A short test sentence, for tracing.")]),) + args_e
+            names_e, axes_e = ["t5_ids"] + names_e, {"t5_ids": {1: "St"}, **axes_e}
         ck_, cv_, dm_ = enc(*args_e)
         args_d = (torch.tensor([[TOK.BOS]]), torch.tensor([P - 1]), torch.zeros(1, 1, 1, P + 1),
                   ck_, cv_, dm_, torch.zeros(L, 1, H, P, hd), torch.zeros(L, 1, H, P, hd))
-        export(enc, args_e, tmp / "encoder.onnx", ["src", "year", "region", "scots", "z"], ["cross_k", "cross_v", "dec_mod"],
-               {"src": {1: "S"}, "cross_k": {3: "S"}, "cross_v": {3: "S"}})
+        export(enc, args_e, tmp / "encoder.onnx", names_e, ["cross_k", "cross_v", "dec_mod"], axes_e)
         export(dec, args_d, tmp / "decoder.onnx", ["token", "pos", "bias", "cross_k", "cross_v", "dec_mod", "past_k", "past_v"],
                ["logits", "present_k", "present_v"],
                {"bias": {3: "P1"}, "cross_k": {3: "S"}, "cross_v": {3: "S"}, "past_k": {3: "P"}, "past_v": {3: "P"},
@@ -185,7 +222,16 @@ def main():
             "regions": REGIONS, "z_dim": cfg.cond.z_dim,
             "z_mu": [round(float(v), 6) for v in w.mean(0)], "z_sd": [round(float(v), 6) for v in w.std(0)],
             "years": {"english": en, "scots": sc}, "max_src": 600, "max_pos": cfg.max_len,
-            "precision": "fp32" if a.fp32 else "int8", "built": time.strftime("%Y-%m-%d")}
+            "precision": "fp32" if a.fp32 else "int8", "built": time.strftime("%Y-%m-%d %H:%M")}
+    if hyb:
+        json.dump(vocab, open(out / "t5vocab.json", "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+        meta["t5"] = {"vocab": "t5vocab.json", "max_tokens": vocab["max_tokens"]}
+        probe = ["I don't think we should trust him; he has lied to us before.", "i dont think bananas deserve equal rights tbh",
+                 "Honestly, the weather’s been awful — we’ve stayed in all week!!", "Sarah texted me at 3pm about the £20 she owes Kevin.",
+                 "  Spaces   everywhere\tand\nnewlines ", "Café naïve résumé – “quoted” {braces} ~tilde~", "Ðe weird þorn ȝogh ſ chars",
+                 "URL https://example.com/a_b?c=1 & email a@b.co", "Mr. O'Brien-Smith's 1,234.5 kg", "日本語 and emoji 🙂 mixed in"]
+        bad = [t for t in probe if t5tok.encode(t) != m.t5_ids([t]).input_ids[0].tolist()]
+        print(f"tokenizer port: {len(probe) - len(bad)}/{len(probe)} identical to the reference" + "".join(f"\n   differs: {t!r}" for t in bad))
     json.dump(meta, open(out / "meta.json", "w"), indent=1)
 
     tests = [("I don't think we should trust him; he has lied to us before.", 1600, "england", 0.0),
@@ -198,8 +244,8 @@ def main():
         ref.append(m.generate(src, max_new=400, temperature=0, year=torch.tensor([float(year)]),
                               region=torch.tensor([REGIONS.index(region)]), src_type=torch.tensor([SRC_TYPES.index("modern")]),
                               scots=torch.tensor([scots]), z=z0)[0])
-    f32 = OrtModel(tmp / "encoder.onnx", tmp / "decoder.onnx", cfg) if not a.fp32 else OrtModel(out / "encoder.onnx", out / "decoder.onnx", cfg)
-    fin = OrtModel(out / "encoder.onnx", out / "decoder.onnx", cfg)
+    f32 = OrtModel(tmp / "encoder.onnx", tmp / "decoder.onnx", cfg, t5tok) if not a.fp32 else OrtModel(out / "encoder.onnx", out / "decoder.onnx", cfg, t5tok)
+    fin = OrtModel(out / "encoder.onnx", out / "decoder.onnx", cfg, t5tok)
     print("\ncheck: pytorch vs onnx (greedy)")
     ok = 0
     for (text, year, region, scots), r in zip(tests, ref):

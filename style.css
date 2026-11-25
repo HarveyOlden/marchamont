@@ -38,15 +38,15 @@ img { user-select: none; -webkit-user-drag: none; }
 
 /* ---------- margins & plates ---------- */
 .margin { position: fixed; top: 50%; transform: translateY(-50%); height: min(86vh, 900px); z-index: 1; opacity: .9; filter: url(#ink); }
-.margin-l { left: max(14px, calc(50vw - 760px)); }
-.margin-r { right: max(14px, calc(50vw - 760px)); }
+.margin-l { left: calc(50vw - 775px); }
+.margin-r { right: calc(50vw - 775px); }
 .plates img { position: fixed; z-index: 0; opacity: .1; pointer-events: none; mix-blend-mode: multiply; }
 .plates .p1 { width: 200px; left: 4vw; top: 8vh; transform: rotate(-6deg); }
 .plates .p2 { width: 230px; right: 3vw; bottom: 6vh; transform: rotate(4deg); }
 .plates .p3 { width: 190px; left: 3vw; bottom: 9vh; transform: rotate(3deg); }
 .plates .p4 { width: 110px; right: 6vw; top: 10vh; transform: rotate(-3deg); }
 @media (max-width: 1800px) { .plates { display: none; } }
-@media (max-width: 1180px) { .margin { display: none; } }
+@media (max-width: 1560px) { .margin { display: none; } }
 
 /* ---------- plate ---------- */
 .plate { position: relative; z-index: 2; max-width: 1240px; margin: 0 auto; padding: 18px 28px 30px; }
@@ -74,7 +74,9 @@ textarea {
 }
 textarea::placeholder { color: var(--faded); font-style: italic; }
 .tally { position: absolute; right: 14px; bottom: 10px; font: 13px "Fell SC", serif; color: var(--faded); }
-.vessel-out { display: flex; flex-direction: column; }
+.vessel-in, .vessel-out { display: flex; flex-direction: column; }
+.vessel-in textarea { flex: 1; }
+.foot { position: absolute; left: 50%; bottom: -13px; transform: translateX(-50%); background: var(--paper); color: var(--rubric); padding: 0 8px; font-size: 17px; line-height: 1; }
 .era-band { width: 100%; opacity: .85; margin: -4px 0 12px; transition: opacity .6s; filter: url(#ink); }
 .out { flex: 1; font: 400 20px/1.6 "Pica", "Fell", serif; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
 .out .live::after { content: "▍"; color: var(--rubric); animation: blink 1s steps(2) infinite; margin-left: 1px; }

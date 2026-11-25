@@ -19,7 +19,7 @@ function roman(n) {
   const t = [[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]];
   let s = ""; for (const [v, r] of t) while (n >= v) { s += r; n -= v; } return s;
 }
-const BANDS = [[1450, "prayer_header"], [1550, "lion_header"], [1650, "king_header"], [1750, "eagle_header"], [9999, "devil_header"]];
+const BANDS = [[1480, "prayer_header"], [1600, "king_header"], [1700, "eagle_header"], [9999, "devil_header"]];
 function bandFor(y) { return `assets/cuts/${BANDS.find(([lim]) => y < lim)[1]}.png`; }
 
 function drawTicks() {
@@ -213,7 +213,8 @@ function finish() {
 function go() {
   if (!state.ready) return;
   if (state.working) { worker.postMessage({ type: "cancel" }); return; }
-  const text = els.src.value.trim().slice(0, CONFIG.maxChars);
+  const text = els.src.value.trim().slice(0, CONFIG.maxChars)
+    .replace(/(^|[\s"“'‘(\-])i(?=['’](?:m|ll|d|ve)\b|[\s,;:!?)”"]|\.(?!\w)|$)/g, "$1I");
   if (!text) { els.src.focus(); return; }
   chunkList = chunk(text); pieces = new Array(chunkList.length).fill(null);
   const region = els.region.value === "auto" ? (state.scots ? "scotland" : "england") : els.region.value;

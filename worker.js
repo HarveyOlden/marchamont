@@ -3,7 +3,49 @@ import * as ort from "./vendor/ort.wasm.min.mjs";
 ort.env.wasm.wasmPaths = new URL("./vendor/", import.meta.url).href;
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
 
-let enc, dec, meta, hands = null, cancelled = false;
+let enc, dec, meta, hands = null, cancelled = false, t5 = null;
+
+// T5 unigram tokenizer (same algorithm as pipeline/nedham/t5tok.py)
+const T5NORM = { "“": '"', "”": '"', "‘": "'", "’": "'", "—": " - ", "–": "-", "{": "(", "}": ")", "~": "-" };
+function t5load(v) {
+  const map = new Map(); let maxLen = 1, lo = Infinity;
+  v.pieces.forEach((p, i) => {
+    if (i < 3 || p.startsWith("<extra_id_")) return;
+    map.set(p, i); maxLen = Math.max(maxLen, Array.from(p).length); lo = Math.min(lo, v.scores[i]);
+  });
+  t5 = { map, scores: v.scores, maxLen, unkScore: lo - 10, unk: v.unk, eos: v.eos, max: v.max_tokens };
+}
+function t5word(chars) {
+  const n = chars.length, best = new Float64Array(n + 1).fill(-Infinity), back = new Int32Array(n + 1), bid = new Int32Array(n + 1);
+  best[0] = 0;
+  for (let i = 0; i < n; i++) {
+    if (best[i] === -Infinity) continue;
+    let piece = "", single = false;
+    for (let L = 1; L <= Math.min(t5.maxLen, n - i); L++) {
+      piece += chars[i + L - 1];
+      const j = t5.map.get(piece);
+      if (j === undefined) continue;
+      if (L === 1) single = true;
+      const sc = best[i] + t5.scores[j];
+      if (sc > best[i + L]) { best[i + L] = sc; back[i + L] = i; bid[i + L] = j; }
+    }
+    if (!single) {
+      const sc = best[i] + t5.unkScore;
+      if (sc > best[i + 1]) { best[i + 1] = sc; back[i + 1] = i; bid[i + 1] = t5.unk; }
+    }
+  }
+  const seq = [];
+  for (let j = n; j > 0; j = back[j]) seq.push(bid[j]);
+  const out = [];
+  for (const t of seq.reverse()) if (!(t === t5.unk && out[out.length - 1] === t5.unk)) out.push(t);
+  return out;
+}
+function t5encode(text) {
+  const s = text.replace(/[“”‘’—–{}~]/g, (c) => T5NORM[c]).normalize("NFKC").replace(/\s+/g, " ").trim();
+  let ids = [];
+  if (s) for (const w of s.split(" ")) ids = ids.concat(t5word(Array.from("\u2581" + w)));
+  return ids.slice(0, t5.max - 1).concat([t5.eos]);
+}
 
 async function fetchBytes(url, version, onProgress) {
   const key = `${url}?v=${version}`;
@@ -36,7 +78,7 @@ async function load(base) {
   if (!r.ok) throw new Error("nometa");
   meta = await r.json();
   const files = meta.files || { encoder: ["encoder.onnx"], decoder: ["decoder.onnx"] };
-  const all = [...files.encoder, ...files.decoder];
+  const all = [...files.encoder, ...files.decoder, ...(meta.t5 ? [meta.t5.vocab] : [])];
   const sizes = Object.fromEntries(all.map((f) => [f, [0, 0]]));
   const report = () => {
     let got = 0, tot = 0;
@@ -52,6 +94,7 @@ async function load(base) {
   };
   const eb = join(files.encoder), db = join(files.decoder);
   const opt = { executionProviders: ["wasm"], graphOptimizationLevel: "all" };
+  if (meta.t5) t5load(JSON.parse(new TextDecoder().decode(fetched[all.indexOf(meta.t5.vocab)])));
   enc = await ort.InferenceSession.create(eb, opt);
   dec = await ort.InferenceSession.create(db, opt);
   try {
@@ -92,7 +135,10 @@ function scribe(hand, year, region) {
     idx.push(i); w.push(wi); tot += wi;
   }
   if (!idx.length) return z;
+  const order = idx.map((_, j) => j).sort((a, b) => p.years[idx[a]] - p.years[idx[b]] || idx[a] - idx[b]);
   let u = rng(hand.roll)() * tot, k = 0;
+  const ws = order.map((j) => w[j]), is = order.map((j) => idx[j]);
+  idx.length = 0; idx.push(...is); w.length = 0; w.push(...ws);
   while (k < idx.length - 1 && (u -= w[k]) > 0) k++;
   const i = idx[k];
   for (let d = 0; d < p.dim; d++) z[d] = p.lo[d] + p.scale[d] * (p.zq[i * p.dim + d] + 128);
@@ -136,13 +182,15 @@ async function translateChunk(text, s, seed, onPartial) {
   const ids = new BigInt64Array(src.length + 1);
   src.forEach((b, i) => (ids[i] = BigInt(b + meta.offset)));
   ids[src.length] = BigInt(meta.eos);
-  const e = await enc.run({
+  const feed = {
     src: new ort.Tensor("int64", ids, [1, ids.length]),
     year: new ort.Tensor("float32", new Float32Array([s.year]), [1]),
     region: new ort.Tensor("int64", new BigInt64Array([BigInt(s.region)]), [1]),
     scots: new ort.Tensor("float32", new Float32Array([s.scots]), [1]),
     z: new ort.Tensor("float32", scribe(s.hand, s.year, s.region), [1, meta.z_dim]),
-  });
+  };
+  if (t5) { const t = t5encode(text); feed.t5_ids = new ort.Tensor("int64", BigInt64Array.from(t, BigInt), [1, t.length]); }
+  const e = await enc.run(feed);
   const L = meta.layers, H = meta.heads, hd = meta.head_dim;
   let pk = new ort.Tensor("float32", new Float32Array(L * H * hd), [L, 1, H, 1, hd]);
   let pv = new ort.Tensor("float32", new Float32Array(L * H * hd), [L, 1, H, 1, hd]);
