@@ -1,0 +1,4 @@
+pipeline/weights/*.pt
+model/_fp32/
+__pycache__/
+.DS_Store

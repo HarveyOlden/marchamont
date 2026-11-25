@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marchamont</title>
+<meta name="description" content="Translate modern English into the English of 1380–1790, or the Scots of 1500–1905.">
+<link rel="icon" href="assets/icon-32.png">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg class="defs" aria-hidden="true">
+  <filter id="paper"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="3" seed="7"/><feColorMatrix values="0 0 0 0 .35  0 0 0 0 .27  0 0 0 0 .16  0 0 0 .55 0"/></filter>
+  <filter id="ink"><feTurbulence type="fractalNoise" baseFrequency=".04" numOctaves="2" seed="3" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="1.4"/></filter>
+</svg>
+
+<img class="margin margin-l" src="assets/cuts/ornamental_frame.png" alt="">
+<img class="margin margin-r" src="assets/cuts/ornamental_sidebar.png" alt="">
+
+<main class="plate">
+  <header class="masthead">
+    <img class="cherub" src="assets/cuts/ornamental_angel.png" alt="">
+    <h1><span class="rubric">M</span>archamont</h1>
+    <img class="band" src="assets/cuts/king_header.png" alt="">
+  </header>
+
+  <section class="apparatus">
+    <div class="vessel vessel-in">
+      <textarea id="src" spellcheck="true" maxlength="12000" placeholder="Write in plain modern English…" aria-label="Modern English"></textarea>
+      <div class="tally" id="tally"></div>
+    </div>
+
+    <div class="athanor">
+      <div class="dial">
+        <div class="year" id="year" aria-live="polite">1650</div>
+        <div class="roman" id="roman">MDCL</div>
+        <input id="slider" type="range" min="1380" max="1790" step="1" value="1650" aria-label="Year">
+        <div class="ticks" id="ticks"></div>
+      </div>
+
+      <div class="tongue" role="radiogroup" aria-label="Tongue">
+        <button id="t-en" class="on" role="radio" aria-checked="true">English</button>
+        <span class="pip">·</span>
+        <button id="t-sc" role="radio" aria-checked="false">Scots</button>
+      </div>
+
+      <button id="go" class="seal" disabled>
+        <img id="sun" src="assets/cuts/mask.png" alt="">
+        <span id="go-label">Transmute</span>
+      </button>
+      <div class="hourglass" id="hourglass" hidden><img src="assets/cuts/hourglass.png" alt=""><i id="sand"></i></div>
+      <div class="status" id="status"></div>
+
+      <details class="particulars">
+        <summary title="Further particulars">☿ <span>particulars</span></summary>
+        <label>Region
+          <select id="region">
+            <option value="auto">—</option>
+            <option value="england">England</option>
+            <option value="scotland">Scotland</option>
+            <option value="ireland">Ireland</option>
+            <option value="wales">Wales</option>
+            <option value="colonies">Colonies</option>
+            <option value="continent">Continent</option>
+          </select>
+        </label>
+        <label>Hand
+          <span class="hand">
+            <input id="hand" type="number" min="1" max="9999" step="1">
+            <button id="roll" class="roll" title="Another hand"><img src="assets/cuts/pseudo_d20.png" alt="roll"></button>
+            <button id="nohand" class="toggle" title="No particular hand">∅</button>
+          </span>
+        </label>
+        <label>Liberty
+          <input id="liberty" type="range" min="0" max="100" step="1" value="35">
+        </label>
+      </details>
+    </div>
+
+    <div class="vessel vessel-out">
+      <img class="era-band" id="era-band" src="assets/cuts/king_header.png" alt="">
+      <div id="out" class="out" aria-live="polite"></div>
+      <img class="tailpiece" id="tail" alt="">
+      <div class="tools" id="tools" hidden>
+        <button id="copy" title="Copy">❧ copy</button>
+        <button id="save" title="Download">⤓ save</button>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <img class="band" src="assets/cuts/heart_divider.png" alt="">
+    <nav><a id="weights" href="model/">weights</a><span>·</span><a id="source" href="#">source</a></nav>
+  </footer>
+</main>
+
+<div class="plates" aria-hidden="true">
+  <img src="assets/cuts/geometry.png" class="p1" alt="">
+  <img src="assets/cuts/creatures.png" class="p2" alt="">
+  <img src="assets/cuts/ship.png" class="p3" alt="">
+  <img src="assets/cuts/turnip.png" class="p4" alt="">
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
